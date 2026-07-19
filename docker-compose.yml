@@ -1,0 +1,27 @@
+services:
+  server:
+    build:
+      context: ./server
+    container_name: ueba-server
+    environment:
+      UEBA_HOST: 0.0.0.0
+      UEBA_PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./server/data:/app/data
+      - ./server/models:/app/models
+      - ./server/reports:/app/reports
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+    container_name: ueba-client
+    environment:
+      VITE_API_URL: http://127.0.0.1:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - server
+    restart: unless-stopped
