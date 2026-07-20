@@ -78,18 +78,47 @@ class Autoencoder:
 
 
 @dataclass
+class ThreatClassifier:
+    labels: list[str]
+    centroids: np.ndarray
+
+    def predict(self, normalized_vector: np.ndarray) -> dict[str, float | str]:
+        distances = np.linalg.norm(self.centroids - normalized_vector[0], axis=1)
+        similarities = 1.0 / np.maximum(distances, 1e-9)
+        probabilities = similarities / float(similarities.sum())
+        index = int(np.argmax(probabilities))
+        return {"threat_class": self.labels[index], "threat_confidence": float(probabilities[index])}
+
+    def to_json(self) -> dict[str, object]:
+        return {"labels": self.labels, "centroids": self.centroids.tolist()}
+
+    @classmethod
+    def from_json(cls, payload: dict[str, object]) -> "ThreatClassifier":
+        return cls(
+            labels=[str(label) for label in payload["labels"]],
+            centroids=np.asarray(payload["centroids"], dtype=np.float64),
+        )
+
+
+@dataclass
 class ModelBundle:
     autoencoder: Autoencoder
     normalizer: FeatureNormalizer
     feature_columns: list[str]
     threshold: float
     training_errors: list[float]
+    threat_classifier: ThreatClassifier | None = None
 
     def evaluate(self, matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         normalized = self.normalizer.transform(matrix)
         reconstructed = self.autoencoder.reconstruct(normalized)
         errors = np.mean(np.square(reconstructed - normalized), axis=1)
         return errors, normalized, reconstructed
+
+    def classify_threat(self, normalized_vector: np.ndarray) -> dict[str, float | str]:
+        if not self.threat_classifier:
+            return {"threat_class": "unknown_anomaly", "threat_confidence": 0.0}
+        return self.threat_classifier.predict(normalized_vector)
 
     def is_anomaly(self, matrix: np.ndarray) -> np.ndarray:
         errors, _, _ = self.evaluate(matrix)
@@ -103,18 +132,21 @@ class ModelBundle:
             "threshold": self.threshold,
             "training_errors": self.training_errors,
             "normalizer": self.normalizer.to_json(),
+            "threat_classifier": self.threat_classifier.to_json() if self.threat_classifier else None,
         }
         (model_dir / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, model_dir: Path) -> "ModelBundle":
         metadata = json.loads((model_dir / METADATA_FILE).read_text(encoding="utf-8"))
+        threat_classifier = metadata.get("threat_classifier")
         return cls(
             autoencoder=Autoencoder.load(model_dir / MODEL_FILE),
             normalizer=FeatureNormalizer.from_json(metadata["normalizer"]),
             feature_columns=list(metadata["feature_columns"]),
             threshold=float(metadata["threshold"]),
             training_errors=[float(value) for value in metadata.get("training_errors", [])],
+            threat_classifier=ThreatClassifier.from_json(threat_classifier) if threat_classifier else None,
         )
 
 
@@ -139,6 +171,7 @@ def train_model(
     autoencoder.train(normalized, epochs=epochs, learning_rate=learning_rate)
     errors = autoencoder.reconstruction_errors(normalized)
     threshold = float(np.quantile(errors, threshold_quantile))
+    threat_classifier = train_threat_classifier(normalized, list(feature_columns), seed=seed)
 
     return ModelBundle(
         autoencoder=autoencoder,
@@ -146,4 +179,53 @@ def train_model(
         feature_columns=list(feature_columns),
         threshold=threshold,
         training_errors=[float(value) for value in errors],
+        threat_classifier=threat_classifier,
     )
+
+
+def train_threat_classifier(normalized_matrix: np.ndarray, feature_columns: list[str], seed: int = 42) -> ThreatClassifier:
+    rng = np.random.default_rng(seed)
+    sample_count = normalized_matrix.shape[0]
+    scenario_offsets = {
+        "data_exfiltration": {
+            "bytes_sent_per_sec": 7.5,
+            "packets_sent_per_sec": 4.5,
+            "remote_ip_count": 2.5,
+            "remote_port_count": 2.5,
+        },
+        "c2_or_remote_access": {
+            "established_count": 6.5,
+            "connection_count": 4.5,
+            "remote_ip_count": 4.0,
+            "bytes_recv_per_sec": 2.5,
+        },
+        "port_tunneling_or_policy_bypass": {
+            "uncommon_remote_port_count": 7.0,
+            "remote_port_count": 5.5,
+            "listen_count": 3.0,
+        },
+        "process_execution_burst": {
+            "new_process_count": 7.0,
+            "process_count": 4.0,
+            "cpu_percent": 4.0,
+            "thread_count": 3.0,
+        },
+        "resource_abuse": {
+            "cpu_percent": 7.0,
+            "memory_percent": 4.5,
+            "thread_count": 4.0,
+            "open_file_count": 3.0,
+        },
+    }
+    labels: list[str] = []
+    centroids: list[np.ndarray] = []
+
+    for label, offsets in scenario_offsets.items():
+        synthetic = normalized_matrix[rng.integers(0, sample_count, size=min(256, max(sample_count, 16)))].copy()
+        for feature, offset in offsets.items():
+            if feature in feature_columns:
+                synthetic[:, feature_columns.index(feature)] += offset
+        labels.append(label)
+        centroids.append(synthetic.mean(axis=0))
+
+    return ThreatClassifier(labels=labels, centroids=np.vstack(centroids))

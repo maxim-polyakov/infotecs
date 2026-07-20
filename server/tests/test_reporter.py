@@ -1,7 +1,7 @@
 import numpy as np
 
 from ueba_prototype.collector import TelemetrySample
-from ueba_prototype.reporter import build_report
+from ueba_prototype.reporter import build_report, read_jsonl
 
 
 def test_build_report_contains_security_explanation() -> None:
@@ -33,7 +33,28 @@ def test_build_report_contains_security_explanation() -> None:
     normalized = np.array([[10.0, 0.0, 0.0]])
     reconstructed = np.array([[0.0, 0.0, 0.0]])
 
-    report = build_report(sample, columns, normalized, reconstructed, anomaly_score=100.0, threshold=10.0)
+    report = build_report(
+        sample,
+        columns,
+        normalized,
+        reconstructed,
+        anomaly_score=100.0,
+        threshold=10.0,
+        threat_class="data_exfiltration",
+        threat_confidence=0.91,
+    )
 
+    assert report.threat_class == "data_exfiltration"
+    assert report.threat_confidence == 0.91
     assert report.top_features[0]["feature"] == "connection_count"
+    assert any("ML threat class" in explanation for explanation in report.explanations)
     assert any("network connections" in explanation for explanation in report.explanations)
+
+
+def test_read_jsonl_recovers_literal_newline_separator(tmp_path) -> None:
+    path = tmp_path / "broken.jsonl"
+    path.write_text('{"id": 1}\\n{"id": 2}\n', encoding="utf-8")
+
+    reports = read_jsonl(path)
+
+    assert reports == [{"id": 1}, {"id": 2}]

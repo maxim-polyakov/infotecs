@@ -26,12 +26,23 @@ SECURITY_HINTS = {
     "memory_percent": "memory usage differs from baseline; possible resource abuse or suspicious workload",
 }
 
+THREAT_CLASS_EXPLANATIONS = {
+    "data_exfiltration": "ML threat class: likely data exfiltration or unusually high outbound transfer",
+    "c2_or_remote_access": "ML threat class: likely command-and-control beaconing or unauthorized remote access",
+    "port_tunneling_or_policy_bypass": "ML threat class: likely non-standard port tunneling or policy bypass",
+    "process_execution_burst": "ML threat class: likely suspicious process execution burst",
+    "resource_abuse": "ML threat class: likely resource abuse such as miner or intensive malware task",
+    "unknown_anomaly": "ML threat class: anomaly does not match a known synthetic threat profile",
+}
+
 
 @dataclass
 class AnomalyReport:
     timestamp: float
     anomaly_score: float
     threshold: float
+    threat_class: str
+    threat_confidence: float
     top_features: list[dict[str, float | str]]
     explanations: list[str]
     sample: dict[str, Any]
@@ -41,6 +52,8 @@ class AnomalyReport:
             "timestamp": self.timestamp,
             "anomaly_score": self.anomaly_score,
             "threshold": self.threshold,
+            "threat_class": self.threat_class,
+            "threat_confidence": self.threat_confidence,
             "top_features": self.top_features,
             "explanations": self.explanations,
             "sample": self.sample,
@@ -54,6 +67,8 @@ def build_report(
     reconstructed_vector: np.ndarray,
     anomaly_score: float,
     threshold: float,
+    threat_class: str = "unknown_anomaly",
+    threat_confidence: float = 0.0,
     top_n: int = 5,
 ) -> AnomalyReport:
     sample_dict = _sample_to_dict(sample)
@@ -65,11 +80,16 @@ def build_report(
         if float(feature_errors[index]) > 0.0
     ]
     explanations = explain_features([str(item["feature"]) for item in top_features])
+    threat_explanation = THREAT_CLASS_EXPLANATIONS.get(threat_class)
+    if threat_explanation:
+        explanations.insert(0, threat_explanation)
 
     return AnomalyReport(
         timestamp=float(sample_dict.get("timestamp", 0.0)),
         anomaly_score=float(anomaly_score),
         threshold=float(threshold),
+        threat_class=threat_class,
+        threat_confidence=float(threat_confidence),
         top_features=top_features,
         explanations=explanations,
         sample=sample_dict,
@@ -96,18 +116,32 @@ def append_jsonl(path: Path, report: AnomalyReport) -> None:
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    content = path.read_text(encoding="utf-8")
+    content = content.replace("}\\n{", "}\n{")
     reports: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                reports.append(json.loads(line))
+    decoder = json.JSONDecoder()
+    position = 0
+    while position < len(content):
+        while position < len(content) and content[position].isspace():
+            position += 1
+        while content.startswith("\\n", position):
+            position += 2
+            while position < len(content) and content[position].isspace():
+                position += 1
+        if position >= len(content):
+            break
+        report, position = decoder.raw_decode(content, position)
+        reports.append(report)
     return reports
 
 
 def write_csv(path: Path, reports: Sequence[AnomalyReport]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["timestamp", "anomaly_score", "threshold", "top_features", "explanations"])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["timestamp", "anomaly_score", "threshold", "threat_class", "threat_confidence", "top_features", "explanations"],
+        )
         writer.writeheader()
         for report in reports:
             writer.writerow(
@@ -115,6 +149,8 @@ def write_csv(path: Path, reports: Sequence[AnomalyReport]) -> None:
                     "timestamp": report.timestamp,
                     "anomaly_score": report.anomaly_score,
                     "threshold": report.threshold,
+                    "threat_class": report.threat_class,
+                    "threat_confidence": report.threat_confidence,
                     "top_features": "; ".join(str(item["feature"]) for item in report.top_features),
                     "explanations": "; ".join(report.explanations),
                 }

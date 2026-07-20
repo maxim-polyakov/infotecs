@@ -20,6 +20,7 @@ class Detector:
         score = float(errors[0])
         if score <= self.bundle.threshold:
             return None
+        threat = self.bundle.classify_threat(normalized)
         return build_report(
             sample=sample,
             feature_columns=self.bundle.feature_columns,
@@ -27,6 +28,8 @@ class Detector:
             reconstructed_vector=reconstructed,
             anomaly_score=score,
             threshold=self.bundle.threshold,
+            threat_class=str(threat["threat_class"]),
+            threat_confidence=float(threat["threat_confidence"]),
         )
 
 

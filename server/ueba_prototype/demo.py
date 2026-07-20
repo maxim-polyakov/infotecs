@@ -63,6 +63,7 @@ def run_demo(output_dir: Path) -> list[AnomalyReport]:
         sample_matrix = rows_to_matrix([vars(sample)])
         errors, normalized, reconstructed = bundle.evaluate(sample_matrix)
         if float(errors[0]) > bundle.threshold:
+            threat = bundle.classify_threat(normalized)
             reports.append(
                 build_report(
                     sample=sample,
@@ -71,6 +72,8 @@ def run_demo(output_dir: Path) -> list[AnomalyReport]:
                     reconstructed_vector=reconstructed,
                     anomaly_score=float(errors[0]),
                     threshold=bundle.threshold,
+                    threat_class=str(threat["threat_class"]),
+                    threat_confidence=float(threat["threat_confidence"]),
                 )
             )
 

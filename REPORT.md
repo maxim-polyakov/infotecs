@@ -15,7 +15,7 @@
 5. `server/ueba_server/config` — конфигурация приложения и CORS.
 6. `server/ueba_prototype.collector` собирает телеметрию через `psutil`.
 7. `server/ueba_prototype.features` переводит события в числовой вектор и выполняет нормализацию.
-8. `server/ueba_prototype.model` обучает нейросетевой автоэнкодер и выбирает порог аномальности.
+8. `server/ueba_prototype.model` обучает нейросетевой автоэнкодер, выбирает порог аномальности и обучает ML-классификатор типов угроз.
 9. `server/ueba_prototype.detector` применяет сохраненную модель к текущим событиям.
 10. `server/ueba_prototype.reporter` формирует отчеты и объяснения.
 
@@ -55,6 +55,18 @@ cd server
 python -m ueba_prototype train --data data/raw.csv --model-dir models/default --threshold-quantile 0.995
 ```
 
+Дополнительно вместе с моделью обучается ML-классификатор типов угроз. Поскольку реальная обучающая выборка является профилем нормального поведения и не содержит размеченных атак, классы угроз формируются как синтетически размеченные аномальные профили поверх нормализованной обучающей выборки. Используется centroid-based classifier: для каждого класса строится центр синтетического профиля угрозы, а новое аномальное окно относится к ближайшему классу с расчетом confidence.
+
+Поддерживаемые классы:
+
+- `data_exfiltration` — нетипично высокий исходящий трафик;
+- `c2_or_remote_access` — множество активных соединений и удаленных узлов;
+- `port_tunneling_or_policy_bypass` — нестандартные удаленные порты и туннелирование;
+- `process_execution_burst` — массовый запуск процессов и рост CPU/thread activity;
+- `resource_abuse` — повышенная нагрузка CPU/RAM/потоков.
+
+Классификатор сохраняется вместе с автоэнкодером в `server/models/default/metadata.json`.
+
 ## Анализ и отчеты
 
 Запуск детектора:
@@ -64,7 +76,7 @@ cd server
 python -m ueba_prototype detect --model-dir models/default --interval 5 --reports reports/anomalies.jsonl
 ```
 
-Отчет содержит общий score, порог, признаки с наибольшим вкладом и объяснение. Примеры интерпретаций:
+Отчет содержит общий score, порог, ML-класс угрозы (`threat_class`), уверенность классификатора (`threat_confidence`), признаки с наибольшим вкладом и объяснение. Примеры интерпретаций:
 
 - высокий `connection_count` и `remote_ip_count`: возможное сканирование, lateral movement или C2-активность;
 - высокий `bytes_sent_per_sec`: возможная эксфильтрация данных;
@@ -72,6 +84,46 @@ python -m ueba_prototype detect --model-dir models/default --interval 5 --report
 - высокий `new_process_count`: массовый запуск процессов, скриптовая активность или malware/living-off-the-land.
 
 ## Результаты тестирования
+
+### Реальный 24-часовой сбор и обучение
+
+Был выполнен непрерывный сбор обучающей выборки на рабочем ПК:
+
+```bash
+cd server
+python -m ueba_prototype collect --duration-hours 24 --interval 5 --out data/raw.csv
+```
+
+Результат сбора: `3337` окон телеметрии в файле `server/data/raw.csv`. Сбор выполнялся примерно 24 часа с интервалом 5 секунд. На этой выборке была обучена модель нормального поведения:
+
+```bash
+cd server
+python -m ueba_prototype train --data data/raw.csv --model-dir models/default
+```
+
+Модель и параметры нормализации сохранены в `server/models/default`, что позволяет запускать детектор без повторного обучения.
+
+### Проверка детектора на сохраненной модели
+
+После обучения был запущен детектор с использованием сохраненной модели:
+
+```bash
+cd server
+python -m ueba_prototype detect --model-dir models/default --interval 5 --reports reports/anomalies.jsonl
+```
+
+Детектор обнаружил не менее `10` аномальных окон активности; на момент фиксации результатов файл `server/reports/anomalies.jsonl` содержит `12` записей. Для каждой аномалии сохранены `anomaly_score`, `threshold`, `threat_class`, `threat_confidence`, исходное окно телеметрии, признаки с наибольшим вкладом и ИБ-объяснения.
+
+Характерные признаки найденных аномалий:
+
+- высокий `bytes_sent_per_sec`: возможная эксфильтрация данных или нетипичный исходящий сетевой обмен;
+- высокий `established_count` и `connection_count`: возможная C2-активность, сканирование или нестандартная сетевая активность;
+- высокий `uncommon_remote_port_count` и `remote_port_count`: возможное использование нестандартных удаленных портов или туннелирование;
+- повышенный `thread_count`: нетипичная фоновая нагрузка.
+
+Пример ИБ-интерпретации из отчета: `high outbound traffic; possible data exfiltration`, `many active outbound sessions; possible malware beaconing or unauthorized remote access`, `rare remote ports observed; possible non-standard C2 channel or policy bypass`.
+
+### Синтетический demo-сценарий
 
 Для быстрой проверки реализован демо-сценарий:
 
