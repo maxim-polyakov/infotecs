@@ -25,6 +25,9 @@ dev = [
 ueba-prototype = "ueba_prototype.cli:main"
 ueba-server = "ueba_server.api:main"
 
+[tool.setuptools.packages.find]
+include = ["ueba_prototype*", "ueba_server*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
